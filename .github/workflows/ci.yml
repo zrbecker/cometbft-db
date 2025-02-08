@@ -1,4 +1,4 @@
-name: Test fast (no changes to Dockerfile)
+name: Test
 
 on:
   pull_request:
@@ -12,30 +12,32 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  check-container:
+  check-tools:
     runs-on: ubuntu-latest
     outputs:
-      exists: ${{ steps.check.outputs.exists }}
-    steps:
-      - name: Check if Docker image exists
-        id: check
-        run: |
-          if docker manifest inspect cometbft/cometbft-db-testing:v1.0.3 &>/dev/null; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-
-  test-fast:
-    needs: check-container
-    if: needs.check-container.outputs.exists == 'true'
-    runs-on: ubuntu-latest
-    container: cometbft/cometbft-db-testing:v1.0.3
+      tools_changed: ${{ steps.check.outputs.tools_changed }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure Git Safe Directory
-        run: git config --global --add safe.directory /__w/cometbft-db/cometbft-db
+      - name: Check if tools/** was modified
+        id: check
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.sha }} --depth=1
+          if git diff --name-only ${{ github.event.pull_request.base.sha }} | grep -q '^tools/'; then
+            echo "tools_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "tools_changed=false" >> $GITHUB_OUTPUT
+          fi
+
+  test-fast:
+    needs: check-tools
+    if: needs.check-tools.outputs.tools_changed == 'false'
+    runs-on: ubuntu-latest
+    container: cometbft/cometbft-db-testing
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: echo "GO_VERSION=$(cat .github/workflows/go-version.env | grep GO_VERSION | cut -d '=' -f2)" >> $GITHUB_ENV
 
       - uses: actions/setup-go@v5
         with:
@@ -49,35 +51,27 @@ jobs:
         with:
           file: ./coverage.txt
 
-  test-slow:
-    needs: check-container
-    if: needs.check-container.outputs.exists == 'false'
+  test:
+    needs: check-tools
+    if: needs.check-tools.outputs.tools_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Build
         uses: docker/setup-buildx-action@v3.8.0
         with:
           driver: docker
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build Docker image (arm64) to ensure it works
-        uses: docker/build-push-action@v6
-        with:
-          context: ./tools
-          file: ./tools/Dockerfile.arm64
-          platforms: linux/arm64
-
-      - name: Build Docker image (amd64) to be used in the next step
+      - name: Build Docker image
         uses: docker/build-push-action@v6
         with:
           context: ./tools
           file: ./tools/Dockerfile
           tags: "cometbft/cometbft-db-testing:latest"
-          platforms: linux/amd64
           load: true
 
       - name: test & coverage report creation
